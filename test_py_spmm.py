@@ -58,8 +58,7 @@ def mul_coo_coo(A, B):
     ArrayType = c_int*M
     addr = addressof(pointerB_C.contents)
     pointerB_C = np.frombuffer(ArrayType.from_address(addr), dtype = np.int32, count = M)
-    pointerB_C = np.append(pointerB_C, nnz)
-    
+    pointerB_C = np.append(pointerB_C, np.array(nnz, dtype = np.int32))
     # ZHC TODO NOTE Check if the memory needs deallocation!!!
     # e.g. if the numpy object is destoryed, what about the data?
 
