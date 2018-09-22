@@ -3,11 +3,15 @@
 import numpy as np
 from ctypes import *
 import scipy.sparse as spsp
+import scipy.sparse._sparsetools as _sparsetools
+import sparse
+from sparse import COO
 
 libspmm = cdll.LoadLibrary("./libspmm.so")
 
 def get_indptr(A):
-    row = A.row
+    #row = A.row
+    row = A.coords[0]
     indptr = np.zeros(A.shape[0] + 1, dtype=np.int32)
     np.cumsum(np.bincount(row, minlength=A.shape[0]), out=indptr[1:])
     return indptr
@@ -20,77 +24,109 @@ def mul_coo_coo(A, B):
 
     # convert dtype to c_int and c_double
     rowIndex_A = get_indptr(A)
-    columns_A = A.col.astype(np.int32)
+    #columns_A = A.col.astype(np.int32)
+    columns_A = A.coords[1].astype(np.int32)
     values_A = A.data.astype(np.double)
     
     rowIndex_B = get_indptr(B)
-    columns_B = B.col.astype(np.int32)
+    #columns_B = B.col.astype(np.int32)
+    columns_B = B.coords[1].astype(np.int32)
     values_B = B.data.astype(np.double)
 
     # output variables
-    pointerB_C = POINTER(c_int)()
-    pointerE_C = POINTER(c_int)()
-    columns_C = POINTER(c_int)()
-    values_C = POINTER(c_double)()
+    pointerB_C_p = POINTER(c_int)()
+    pointerE_C_p = POINTER(c_int)()
+    columns_C_p = POINTER(c_int)()
+    values_C_p = POINTER(c_double)()
     nnz = c_int(0)
+    handle_C = c_void_p() # used to free data
 
     # calculation
     libspmm.spmm(byref(c_int(M)), byref(c_int(N)), byref(c_int(K)), \
             rowIndex_A.ctypes.data_as(c_void_p), columns_A.ctypes.data_as(c_void_p), values_A.ctypes.data_as(c_void_p), \
             rowIndex_B.ctypes.data_as(c_void_p), columns_B.ctypes.data_as(c_void_p), values_B.ctypes.data_as(c_void_p), \
-            byref(pointerB_C), byref(pointerE_C), byref(columns_C), byref(values_C), byref(nnz))
+            byref(pointerB_C_p), byref(pointerE_C_p), byref(columns_C_p), byref(values_C_p), byref(nnz), byref(handle_C))
     
     nnz = nnz.value
-    
-    #a = np.fromiter(values_C, dtype=np.double, count=nnz)
-    #print "a"
-    #print a
-   
-    # convert to numpy objects
-    ArrayType = c_double*nnz
-    addr = addressof(values_C.contents)
-    values_C = np.frombuffer(ArrayType.from_address(addr), dtype = np.double, count = nnz)
-    
-    ArrayType = c_int*nnz
-    addr = addressof(columns_C.contents)
-    columns_C = np.frombuffer(ArrayType.from_address(addr), dtype = np.int32, count = nnz)
-    
-    ArrayType = c_int*M
-    addr = addressof(pointerB_C.contents)
-    pointerB_C = np.frombuffer(ArrayType.from_address(addr), dtype = np.int32, count = M)
-    pointerB_C = np.append(pointerB_C, np.array(nnz, dtype = np.int32))
-    # ZHC TODO NOTE Check if the memory needs deallocation!!!
-    # e.g. if the numpy object is destoryed, what about the data?
 
-    return pointerB_C, columns_C, values_C
+    # convert to numpy object
+    buffer_tmp = np.core.multiarray.int_asbuffer(addressof(values_C_p.contents),\
+            np.dtype(np.double).itemsize * nnz)
+    values_C = np.frombuffer(buffer_tmp, np.double).copy()
+
+    buffer_tmp = np.core.multiarray.int_asbuffer(
+                addressof(columns_C_p.contents), np.dtype(np.int32).itemsize * nnz)
+    columns_C = np.frombuffer(buffer_tmp, np.int32).copy()
+
+    buffer_tmp = np.core.multiarray.int_asbuffer(
+                addressof(pointerB_C_p.contents), np.dtype(np.int32).itemsize * M)
+    pointerB_C = np.frombuffer(buffer_tmp, np.int32).copy()
+    pointerB_C = np.append(pointerB_C, np.array(nnz, dtype = np.int32)) # automatically do the copy
+
+    # free C
+    libspmm.free_handle(byref(handle_C))
+
+    # compute full row of C
+    rows_C = np.empty(nnz, dtype = columns_C.dtype)
+    _sparsetools.expandptr(M, pointerB_C, rows_C)
+   
+    # sort the cols and data
+    idx_C = np.empty(nnz, dtype = np.int64)
+    pre_num = 0
+    for i in xrange(M):
+        idx_C[pointerB_C[i]:pointerB_C[i + 1]] = np.argsort(columns_C[pointerB_C[i]:pointerB_C[i + 1]]) + pre_num
+        pre_num += pointerB_C[i + 1] - pointerB_C[i]
+    columns_C = columns_C[idx_C]
+    values_C = values_C[idx_C]
+    
+    return COO(np.vstack((rows_C, columns_C)), data = values_C, shape = (M, N), sorted = True, has_duplicates = False)
 
 if __name__ == '__main__':
+   
+    import time
+    M = 5000
+    N = 5000
+    K = 5000
+    A_d = np.random.random((M, K))
+    A_d[A_d < 0.9] = 0.0
+    B_d = np.random.random((K, N))
+    B_d[B_d < 0.9] = 0.0
     
-    a = np.arange(16).reshape((4,4))
-    b = a.T
-    C_d =  a.dot(b) # dense reference
+    t1 = time.time()
+    C_d =  A_d.dot(B_d) # dense reference
+    t2 = time.time()
     
     print "a matrix"
-    print a
+    print A_d
     print "b matrix"
-    print b
+    print B_d
     print "c reference"
     print C_d
 
-    A = spsp.coo_matrix(a)
-    B = spsp.coo_matrix(b)
+    #A = spsp.coo_matrix(A_d)
+    #B = spsp.coo_matrix(B_d)
+    A = COO(A_d)
+    B = COO(B_d)
 
-    indptr, col, data = mul_coo_coo(A, B)
     
-    print "calc" 
-    
-    # ZHC NOTE the result can change if you comment the following three lines
-    print indptr
-    print col
-    print data
+    t3 = time.time()
+    C = A.dot(B)
+    t4 = time.time()
 
-    C = spsp.csr_matrix((data, col, indptr), shape = (4,4))
+    t5 = time.time()
+    C_coo = mul_coo_coo(A, B)
+    t6 = time.time()
+    
+    print "MKL sparse" 
+    
+    #C = spsp.csr_matrix((data, col, indptr), shape = (M, N))
     print "c calculated from spmm"
-    print C.todense()
+    print C_coo.todense()
 
-    assert(np.allclose(C_d, C.todense()))
+    assert(np.allclose(C_d, C_coo.todense()))
+    print "dense time"
+    print t2 - t1
+    print "COO time"
+    print t4 - t3
+    print "MKL sparse time"
+    print t6 - t5

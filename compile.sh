@@ -1,2 +1,2 @@
 #! /usr/bin/env bash
-icpc -mkl -g -fPIC -shared spmm.c -o libspmm.so
+icpc -mkl -fPIC -shared -O3 spmm.c -o libspmm.so 
